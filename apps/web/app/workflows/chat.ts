@@ -1008,14 +1008,30 @@ export async function runAgentWorkflow(options: Options) {
     workflowStatus = wasAborted ? "aborted" : "failed";
     caughtError = error;
 
-    if (pendingAssistantResponse.parts.length === 0 && !streamClosed) {
+    const errorMsg =
+      error instanceof Error ? error.message : String(error);
+    console.error(`[v0] Workflow error:`, errorMsg, error);
+
+    // Send error text to client if the stream is still open. This happens
+    // regardless of whether any content was already streamed, so users see
+    // provider errors (bad API key, endpoint blocked, etc.) even after a
+    // "thinking" message has appeared.
+    if (!streamClosed) {
       const errorText = getSetupErrorMessage(error);
-      pendingAssistantResponse = {
-        ...pendingAssistantResponse,
-        parts: [{ type: "text", text: errorText }],
-      };
+      
+      // If no content was streamed yet, add it to pendingAssistantResponse.
+      // If content was already streamed (e.g. thinking block), just send the
+      // error as an additional message without creating a separate assistant response.
+      if (pendingAssistantResponse.parts.length === 0) {
+        pendingAssistantResponse = {
+          ...pendingAssistantResponse,
+          parts: [{ type: "text", text: errorText }],
+        };
+        await persistAssistantMessage(options.chatId, pendingAssistantResponse);
+      }
+      
+      // Always send the error to the stream so the UI gets feedback.
       await sendTextMessage(writable, "setup-error", errorText);
-      await persistAssistantMessage(options.chatId, pendingAssistantResponse);
     }
   } finally {
     try {
