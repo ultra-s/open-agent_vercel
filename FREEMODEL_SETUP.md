@@ -32,17 +32,20 @@ GATEWAY_PROVIDER_NAME=FreeModel
 
 ## How It Works
 
-When you configure a custom gateway:
+The routing priority (in order):
 
-1. **BYOK models take priority** — If you've added specific models via the BYOK settings (Settings → BYOK), those will still route through their configured endpoints first.
+1. **Explicit BYOK Model Selection** — If you selected a model labeled "(BYOK)" from the picker, that connection is used
+2. **Custom Gateway (FreeModel)** — If `GATEWAY_*` env vars are set, **ALL regular model requests go through this endpoint**
+3. **Per-Model BYOK Connection** — If you added specific models to a BYOK connection (only checked if custom gateway is not set)
+4. **Active BYOK Connection** — If you marked a BYOK connection as "active" (only checked if custom gateway is not set)
+5. **Default Vercel AI Gateway** — If no custom config is set
 
-2. **Active BYOK connection is next** — If you've marked a BYOK connection as "active", it routes all models through that endpoint.
+**Important:** When `GATEWAY_BASE_URL` and `GATEWAY_API_KEY` are configured, FreeModel becomes the default gateway for all hardcoded models. Set these variables to **override the Vercel AI Gateway completely**.
 
-3. **Custom gateway is the fallback** — Only if neither BYOK option matches will the request route through the custom gateway.
-
-4. **Model ID translation** — The system automatically strips the `provider/` prefix from gateway model IDs when sending to custom OpenAI-compatible endpoints:
+**Model ID translation** — The system automatically strips the `provider/` prefix when sending to custom endpoints:
    - `openai/gpt-4-turbo` → `gpt-4-turbo`
-   - `google/gemini-2-flash` → `gemini-2-flash` (requires `GATEWAY_FORMAT=openai-compatible`)
+   - `google/gemini-2-flash` → `gemini-2-flash`
+   - `anthropic/claude-opus-4.6` → `claude-opus-4.6`
 
 ## Example Configurations
 
