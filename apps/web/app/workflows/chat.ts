@@ -299,12 +299,50 @@ function getSetupErrorMessage(error: unknown): string {
     return "Workspace setup failed. Try again in a moment.";
   }
 
+  const msg = error.message.toLowerCase();
+
   if (error.message.includes("Connect GitHub")) {
     return "Connect GitHub to access this repository, then try again.";
   }
 
   if (error.message === "Session is archived") {
     return "This session is archived. Unarchive it to continue.";
+  }
+
+  // BYOK/provider errors
+  if (msg.includes("agent stream error")) {
+    // Extract the underlying provider error message if possible
+    const fullMsg = error.message;
+    if (fullMsg.includes("only accepts requests from")) {
+      return "This BYOK endpoint has restrictions and cannot be used from this application. Try a different endpoint or check the endpoint settings.";
+    }
+    if (
+      fullMsg.includes("401") ||
+      fullMsg.includes("unauthorized") ||
+      fullMsg.includes("invalid api key")
+    ) {
+      return "❌ BYOK authentication failed. Check your API key in settings (Settings → BYOK).";
+    }
+    if (fullMsg.includes("404") || fullMsg.includes("not found")) {
+      return "❌ BYOK endpoint not found or invalid. Check the endpoint URL in settings.";
+    }
+    if (fullMsg.includes("econnrefused") || fullMsg.includes("cannot reach")) {
+      return "❌ Cannot reach the BYOK endpoint. Check the URL and try again.";
+    }
+    if (fullMsg.includes("invalid_request")) {
+      // Try to extract the actual API error message
+      const details = fullMsg.match(/message["\s:]+([^"]+)/)?.[1];
+      return `❌ Model API error: ${details || "Invalid request. Check your configuration."}`;
+    }
+    return `❌ BYOK request failed: ${fullMsg.replace(/agent stream error:\s*/i, "").slice(0, 100)}`;
+  }
+
+  if (msg.includes("invalid api key") || msg.includes("401")) {
+    return "❌ Authentication failed. Check your API key in settings.";
+  }
+
+  if (msg.includes("timeout") || msg.includes("econnrefused")) {
+    return "❌ Cannot connect to the BYOK endpoint. Check the URL and try again.";
   }
 
   return "Workspace setup failed. Try again in a moment.";
@@ -970,14 +1008,30 @@ export async function runAgentWorkflow(options: Options) {
     workflowStatus = wasAborted ? "aborted" : "failed";
     caughtError = error;
 
-    if (pendingAssistantResponse.parts.length === 0 && !streamClosed) {
+    const errorMsg =
+      error instanceof Error ? error.message : String(error);
+    console.error(`[v0] Workflow error:`, errorMsg, error);
+
+    // Send error text to client if the stream is still open. This happens
+    // regardless of whether any content was already streamed, so users see
+    // provider errors (bad API key, endpoint blocked, etc.) even after a
+    // "thinking" message has appeared.
+    if (!streamClosed) {
       const errorText = getSetupErrorMessage(error);
-      pendingAssistantResponse = {
-        ...pendingAssistantResponse,
-        parts: [{ type: "text", text: errorText }],
-      };
+      
+      // If no content was streamed yet, add it to pendingAssistantResponse.
+      // If content was already streamed (e.g. thinking block), just send the
+      // error as an additional message without creating a separate assistant response.
+      if (pendingAssistantResponse.parts.length === 0) {
+        pendingAssistantResponse = {
+          ...pendingAssistantResponse,
+          parts: [{ type: "text", text: errorText }],
+        };
+        await persistAssistantMessage(options.chatId, pendingAssistantResponse);
+      }
+      
+      // Always send the error to the stream so the UI gets feedback.
       await sendTextMessage(writable, "setup-error", errorText);
-      await persistAssistantMessage(options.chatId, pendingAssistantResponse);
     }
   } finally {
     try {
@@ -1058,11 +1112,24 @@ const runAgentStep = async (
     let totalMessageUsage = existingTotalMessageUsage;
     let totalMessageCost = existingTotalMessageCost;
 
-    const result = await webAgent.stream({
-      messages,
-      options: agentOptions,
-      abortSignal: abortController.signal,
-    });
+    let result;
+    try {
+      result = await webAgent.stream({
+        messages,
+        options: agentOptions,
+        abortSignal: abortController.signal,
+      });
+    } catch (streamError) {
+      // If the agent stream fails to start (e.g. bad API key, endpoint blocked),
+      // wrap the error so the workflow catch block can surface it to the client.
+      const errorMessage =
+        streamError instanceof Error ? streamError.message : String(streamError);
+      console.error(
+        `[v0] Agent stream error at step ${stepNumber}:`,
+        errorMessage,
+      );
+      throw new Error(`Agent stream error: ${errorMessage}`);
+    }
 
     for await (const part of result.toUIMessageStream<WebAgentUIMessage>({
       originalMessages,

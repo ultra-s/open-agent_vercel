@@ -1,6 +1,7 @@
 import type { AgentModelSelection } from "@open-agents/agent";
 import type { GatewayConfig } from "@open-agents/agent";
 import { isByokModelOptionId, parseByokModelOptionId } from "@/lib/byok";
+import { getCustomGatewayConfig } from "@/lib/gateway-config";
 import { resolveAvailableModelId } from "@/lib/model-availability";
 import { type ModelVariant, resolveModelSelection } from "@/lib/model-variants";
 import { APP_DEFAULT_MODEL_ID } from "@/lib/models";
@@ -45,16 +46,20 @@ export async function resolveChatModelSelection({
     return { id: APP_DEFAULT_MODEL_ID as AgentModelSelection["id"] };
   }
 
-  // Check if BYOK config should be applied.
   let config: GatewayConfig | undefined;
   // The model id actually sent to the provider. For an explicit BYOK model
   // selection this must be the provider-native model id (e.g. "claude-3-opus"),
   // NOT the composite "byok:model:<conn>:<modelId>" picker id.
   let runtimeModelId = availableModelId;
 
+  // Priority order for gateway routing:
+  // 1. Explicit BYOK model selection (user selected "Model Name (BYOK)")
+  // 2. Custom gateway (FreeModel or other endpoint via GATEWAY_* env vars)
+  // 3. BYOK connections (per-model or active connection)
+  // 4. Default Vercel AI Gateway (no config returned)
+
   if (isByokModelOptionId(availableModelId)) {
-    // Explicit BYOK model selection: resolve the connection (for the endpoint +
-    // key) and the provider-native model id from the composite id.
+    // Explicit BYOK model: resolve the connection and native model id
     if (userId && byokConnections) {
       config = resolveModelToGatewayConfig(
         availableModelId,
@@ -72,39 +77,41 @@ export async function resolveChatModelSelection({
     }
 
     runtimeModelId = parsed.modelId;
-  } else if (userId && byokConnections) {
-    // A hardcoded/catalog gateway model was selected. If the user added a
-    // BYOK connection that includes a model with this same id (plus an
-    // endpoint + key), transparently route the request through their own
-    // endpoint. This takes priority over the global active connection so that
-    // per-model overrides are honored exactly as the user configured them.
-    const gatewayMatch = resolveGatewayModelToByok(
-      availableModelId,
-      byokConnections,
-    );
+  } else {
+    // Hardcoded/catalog gateway model was selected (e.g. "openai/gpt-4-turbo")
+    // Check custom gateway first (FreeModel or other OpenAI-compatible endpoints)
+    const customGatewayConfig = getCustomGatewayConfig();
 
-    if (gatewayMatch) {
-      config = gatewayMatch.config;
-      runtimeModelId = gatewayMatch.modelId;
-    } else {
-      // Otherwise, an active connection may override the endpoint for all
-      // gateway models.
-      config = resolveModelToGatewayConfig(
+    if (customGatewayConfig) {
+      // Custom gateway is configured and takes priority over BYOK
+      config = customGatewayConfig;
+      runtimeModelId = stripGatewayProviderPrefix(availableModelId);
+    } else if (userId && byokConnections) {
+      // No custom gateway; check BYOK connections
+      // First, check for per-model BYOK match
+      const gatewayMatch = resolveGatewayModelToByok(
         availableModelId,
         byokConnections,
-        activeByokConnectionId || null,
       );
 
-      // A BYOK connection always targets a real provider endpoint (anthropic,
-      // openai-compatible, gemini), which expects the provider-native model id
-      // WITHOUT the gateway "provider/" prefix. So when the active connection
-      // routes a catalog model (e.g. "anthropic/claude-opus-4.6") through the
-      // user's endpoint, send the stripped id ("claude-opus-4.6"). This lets a
-      // single Anthropic connection serve ANY Anthropic model in the picker.
-      if (config) {
-        runtimeModelId = stripGatewayProviderPrefix(availableModelId);
+      if (gatewayMatch) {
+        config = gatewayMatch.config;
+        runtimeModelId = gatewayMatch.modelId;
+      } else {
+        // Otherwise, check if an active connection should route this model
+        config = resolveModelToGatewayConfig(
+          availableModelId,
+          byokConnections,
+          activeByokConnectionId || null,
+        );
+
+        if (config) {
+          runtimeModelId = stripGatewayProviderPrefix(availableModelId);
+        }
       }
     }
+    // If no custom gateway and no BYOK match, config remains undefined
+    // and the request goes to the default Vercel AI Gateway
   }
 
   return {
