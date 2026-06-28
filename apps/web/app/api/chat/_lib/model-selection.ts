@@ -1,6 +1,7 @@
 import type { AgentModelSelection } from "@open-agents/agent";
 import type { GatewayConfig } from "@open-agents/agent";
 import { isByokModelOptionId, parseByokModelOptionId } from "@/lib/byok";
+import { getCustomGatewayConfig } from "@/lib/gateway-config";
 import { resolveAvailableModelId } from "@/lib/model-availability";
 import { type ModelVariant, resolveModelSelection } from "@/lib/model-variants";
 import { APP_DEFAULT_MODEL_ID } from "@/lib/models";
@@ -45,12 +46,16 @@ export async function resolveChatModelSelection({
     return { id: APP_DEFAULT_MODEL_ID as AgentModelSelection["id"] };
   }
 
-  // Check if BYOK config should be applied.
+  // Check if BYOK config should be applied, or fall back to custom gateway config.
   let config: GatewayConfig | undefined;
   // The model id actually sent to the provider. For an explicit BYOK model
   // selection this must be the provider-native model id (e.g. "claude-3-opus"),
   // NOT the composite "byok:model:<conn>:<modelId>" picker id.
   let runtimeModelId = availableModelId;
+
+  // If no BYOK or custom gateway is configured, check environment for a
+  // custom gateway override (e.g. FreeModel endpoint).
+  const customGatewayConfig = getCustomGatewayConfig();
 
   if (isByokModelOptionId(availableModelId)) {
     // Explicit BYOK model selection: resolve the connection (for the endpoint +
@@ -102,6 +107,15 @@ export async function resolveChatModelSelection({
       // user's endpoint, send the stripped id ("claude-opus-4.6"). This lets a
       // single Anthropic connection serve ANY Anthropic model in the picker.
       if (config) {
+        runtimeModelId = stripGatewayProviderPrefix(availableModelId);
+      }
+
+      // If no BYOK connection was found and a custom gateway is configured
+      // (e.g. FreeModel), use it as the fallback.
+      if (!config && customGatewayConfig) {
+        config = customGatewayConfig;
+        // Strip the provider prefix for the custom gateway (openai-compatible,
+        // anthropic, gemini endpoints expect native model ids).
         runtimeModelId = stripGatewayProviderPrefix(availableModelId);
       }
     }
